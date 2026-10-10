@@ -1,0 +1,151 @@
+services:
+
+  # -------------------------------------------------------------
+  # 1. POSTGRESQL DATABASE
+  # -------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: logistream-postgres
+    environment:
+      POSTGRES_USER: logistream
+      POSTGRES_PASSWORD: logistream123
+      POSTGRES_DB: logistream_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U logistream -d logistream_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # -------------------------------------------------------------
+  # 2. REDIS (GEO-SPATIAL FLEET CACHE)
+  # -------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: logistream-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # -------------------------------------------------------------
+  # 3. APACHE KAFKA (KRAFT MODE - NO ZOOKEEPER)
+  # -------------------------------------------------------------
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    container_name: logistream-kafka
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092'
+      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+    volumes:
+      - kafkadata:/var/lib/kafka/data
+
+  # -------------------------------------------------------------
+  # 4. FASTAPI CORE REST & WEBSOCKET ENGINE
+  # -------------------------------------------------------------
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: logistream-api
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://logistream:logistream123@postgres:5432/logistream_db
+      SYNC_DATABASE_URL: postgresql://logistream:logistream123@postgres:5432/logistream_db
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # -------------------------------------------------------------
+  # 5. ASYNC DISPATCH WORKER (KAFKA CONSUMER + REDIS GEO)
+  # -------------------------------------------------------------
+  dispatch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: logistream-dispatch
+    command: python -m services.dispatch.main
+    environment:
+      DATABASE_URL: postgresql+asyncpg://logistream:logistream123@postgres:5432/logistream_db
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      api:
+        condition: service_started
+
+  # -------------------------------------------------------------
+  # 6. ACTIVE DRIVER TELEMETRY SIMULATOR
+  # -------------------------------------------------------------
+  simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: logistream-simulator
+    command: python -m services.simulator.main
+    environment:
+      DATABASE_URL: postgresql+asyncpg://logistream:logistream123@postgres:5432/logistream_db
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      api:
+        condition: service_started
+
+  # -------------------------------------------------------------
+  # 7. STREAMLIT + PYDECK 3D VISUALIZATION DASHBOARD
+  # -------------------------------------------------------------
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: logistream-dashboard
+    command: streamlit run dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+    ports:
+      - "8501:8501"
+    environment:
+      API_BASE_URL: http://api:8000/api/v1
+    depends_on:
+      api:
+        condition: service_started
+
+  # -------------------------------------------------------------
+  # 8. PROMETHEUS METRICS MONITORING
+  # -------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.50.1
+    container_name: logistream-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+
+volumes:
+  pgdata:
+  redisdata:
+  kafkadata:

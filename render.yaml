@@ -1,0 +1,40 @@
+services:
+  # 1. FastAPI Backend API
+  - type: web
+    name: logistream-api
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn api.main:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: logistream-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: redis
+          name: logistream-redis
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+
+  # 2. Streamlit Live Tracking Dashboard
+  - type: web
+    name: logistream-dashboard
+    env: python
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "streamlit run dashboard/app.py --server.port $PORT --server.address 0.0.0.0"
+    envVars:
+      - key: API_BASE_URL
+        fromService:
+          type: web
+          name: logistream-api
+          property: host
+
+databases:
+  - name: logistream-db
+    databaseName: logistream_db
+    user: logistream
+
+  - name: logistream-redis
+    ipAllowList: []
