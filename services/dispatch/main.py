@@ -98,15 +98,72 @@ async def process_order_created(event_data: dict, db: AsyncSession, producer: AI
             value=json.dumps(assigned_envelope).encode("utf-8")
         )
     else:
-        logger.warning(f"No available driver nearby for order {order_id}. Sending to retry topic.")
-        await producer.send_and_wait(
-            settings.KAFKA_ORDER_RETRY_TOPIC,
-            key=order_id.encode("utf-8"),
-            value=json.dumps(event_data).encode("utf-8")
-        )
+        raise NoDriverAvailable(f"No available driver for order {order_id}")
+
+
+# ---------------------------------------------------------------------------
+# Retry with exponential backoff, then dead-letter queue
+# ---------------------------------------------------------------------------
+import time as _time
+
+MAX_RETRIES = 3
+BASE_DELAY_SECONDS = 2  # retry delays: 2s, 4s, 8s
+
+
+class NoDriverAvailable(Exception):
+    pass
+
+
+async def route_failure(event_data: dict, producer: AIOKafkaProducer, error: Exception):
+    """Send a failed event to the retry topic, or to the DLQ once retries are exhausted."""
+    order_id = str(event_data.get("order_id", "unknown"))
+    attempt = int(event_data.get("retry_count", 0)) + 1
+    event_data["retry_count"] = attempt
+    event_data["last_error"] = str(error)
+
+    if attempt > MAX_RETRIES:
+        topic = settings.KAFKA_ORDER_DLQ_TOPIC
+        logger.error(f"Order {order_id} failed {MAX_RETRIES} retries. Routing to DLQ: {error}")
+    else:
+        delay = BASE_DELAY_SECONDS ** attempt
+        event_data["not_before"] = _time.time() + delay
+        topic = settings.KAFKA_ORDER_RETRY_TOPIC
+        logger.warning(f"Order {order_id} attempt {attempt}/{MAX_RETRIES} failed ({error}). Retrying in {delay}s.")
+
+    await producer.send_and_wait(
+        topic,
+        key=order_id.encode("utf-8"),
+        value=json.dumps(event_data).encode("utf-8")
+    )
+
+
+async def consume_loop(consumer: AIOKafkaConsumer, producer: AIOKafkaProducer, name: str):
+    async for msg in consumer:
+        try:
+            event_data = json.loads(msg.value.decode("utf-8"))
+        except Exception as e:
+            # Poison pill: unreadable payload goes straight to the DLQ
+            logger.error(f"[{name}] Unreadable message, routing to DLQ: {e}")
+            await producer.send_and_wait(settings.KAFKA_ORDER_DLQ_TOPIC, key=msg.key, value=msg.value)
+            await consumer.commit()
+            continue
+
+        try:
+            wait = float(event_data.get("not_before", 0)) - _time.time()
+            if wait > 0:
+                await asyncio.sleep(min(wait, 60))
+            if event_data.get("event_type") == "OrderCreated":
+                async with AsyncSessionLocal() as db:
+                    await process_order_created(event_data, db, producer)
+        except Exception as e:
+            await route_failure(event_data, producer, e)
+
+        # Commit the offset only after the event was handled or routed to retry/DLQ
+        await consumer.commit()
+
 
 async def run_dispatch_consumer():
-    logger.info("Starting Dispatch Service consumer loop...")
+    logger.info("Starting Dispatch Service consumer loops...")
     await redis_client.connect()
 
     consumer = AIOKafkaConsumer(
@@ -116,7 +173,13 @@ async def run_dispatch_consumer():
         enable_auto_commit=False,  # Manual offset commit after DB transaction
         auto_offset_reset="earliest"
     )
-
+    retry_consumer = AIOKafkaConsumer(
+        settings.KAFKA_ORDER_RETRY_TOPIC,
+        bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS,
+        group_id=f"{settings.KAFKA_CONSUMER_GROUP_DISPATCH}-retry",
+        enable_auto_commit=False,
+        auto_offset_reset="earliest"
+    )
     producer = AIOKafkaProducer(
         bootstrap_servers=settings.KAFKA_BOOTSTRAP_SERVERS
     )
@@ -124,6 +187,7 @@ async def run_dispatch_consumer():
     while True:
         try:
             await consumer.start()
+            await retry_consumer.start()
             await producer.start()
             logger.info("Connected to Kafka. Listening for OrderCreated events...")
             break
@@ -132,24 +196,16 @@ async def run_dispatch_consumer():
             await asyncio.sleep(5)
 
     try:
-        async for msg in consumer:
-            try:
-                event_data = json.loads(msg.value.decode("utf-8"))
-                event_type = event_data.get("event_type")
-                
-                if event_type == "OrderCreated":
-                    async with AsyncSessionLocal() as db:
-                        await process_order_created(event_data, db, producer)
-                
-                # Commit offset ONLY after successful execution
-                await consumer.commit()
-            except Exception as e:
-                logger.error(f"Error processing dispatch message: {e}")
-                # In production, route poison pill messages to DLQ
+        await asyncio.gather(
+            consume_loop(consumer, producer, "orders"),
+            consume_loop(retry_consumer, producer, "retry"),
+        )
     finally:
         await consumer.stop()
+        await retry_consumer.stop()
         await producer.stop()
         await redis_client.disconnect()
+
 
 if __name__ == "__main__":
     asyncio.run(run_dispatch_consumer())
