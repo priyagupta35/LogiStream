@@ -11,7 +11,7 @@ st.set_page_config(
     layout="wide"
 )
 
-API_BASE_URL = "http://localhost:8000/api/v1"
+API_BASE_URL = "http://api:8000/api/v1"
 
 st.markdown("""
 <style>
@@ -31,7 +31,7 @@ st.caption("Event-Driven Backend Engine powered by Apache Kafka, Redis GEO, Post
 st.sidebar.header("🕹️ Simulation Controls")
 server_status = "ONLINE"
 try:
-    r = requests.get("http://localhost:8000/health", timeout=1)
+    r = requests.get("http://api:8000/health", timeout=1)
     if r.status_code == 200:
         st.sidebar.success("✅ Backend API: ONLINE")
     else:
@@ -83,6 +83,17 @@ if st.sidebar.button("🚀 Emit 'OrderCreated' Event", use_container_width=True)
     except Exception as e:
         st.sidebar.error(f"Error: {e}")
 
+def get_auth_headers():
+    """Log in once as the demo customer and reuse the token."""
+    if not st.session_state.get("token"):
+        creds = {"email": "demo_customer@logistream.com", "password": "Password123"}
+        try:
+            requests.post(f"{API_BASE_URL}/auth/register", json={**creds, "full_name": "Demo Customer", "role": "CUSTOMER"}, timeout=3)
+            login = requests.post(f"{API_BASE_URL}/auth/login", json=creds, timeout=3)
+            st.session_state["token"] = login.json().get("access_token")
+        except Exception:
+            return {}
+    return {"Authorization": f"Bearer {st.session_state['token']}"} if st.session_state.get("token") else {}
 # Fetch Current State
 drivers_data = []
 orders_data = []
@@ -95,7 +106,7 @@ except Exception:
     pass
 
 try:
-    o_res = requests.get(f"{API_BASE_URL}/orders", timeout=2)
+    o_res = requests.get(f"{API_BASE_URL}/orders", headers=get_auth_headers(), timeout=2)
     if o_res.status_code == 200:
         orders_data = o_res.json()
 except Exception:

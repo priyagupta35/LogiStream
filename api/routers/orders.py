@@ -53,7 +53,7 @@ async def create_order(
     )
     db.add(init_event)
     await db.commit()
-    await db.refresh(new_order)
+    await db.refresh(new_order, ["delivery", "events"])
 
     # Emit Kafka event to orders.events (asynchronous backbone)
     try:
