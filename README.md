@@ -4,15 +4,15 @@
 ### Event-Driven Logistics & Real-Time Delivery Backend Engine
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.110-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Apache Kafka](https://img.shields.io/badge/Apache_Kafka-3.7_KRaft-231F20?style=for-the-badge&logo=apachekafka&logoColor=white)](https://kafka.apache.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-Async-009688?style=for-the-badge&logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![Apache Kafka](https://img.shields.io/badge/Apache_Kafka-Confluent_7.6_KRaft-231F20?style=for-the-badge&logo=apachekafka&logoColor=white)](https://kafka.apache.org/)
 [![Redis](https://img.shields.io/badge/Redis-7.0_GEO-DC382D?style=for-the-badge&logo=redis&logoColor=white)](https://redis.io/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
 [![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)](https://www.docker.com/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-PyDeck_3D-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)](https://streamlit.io/)
 
 <p align="center">
-  A high-throughput, event-driven logistics infrastructure simulating enterprise real-time dispatch systems.<br/>
+  An event-driven logistics backend simulating real-time dispatch systems.<br/>
   Engineered to showcase <b>distributed systems</b>, <b>asynchronous stream processing</b>, <b>spatial fleet indexing</b>, and <b>transactional idempotency</b>.
 </p>
 
@@ -82,12 +82,12 @@ LogiStream decouples client write operations from spatial dispatch and telemetri
 | :--- | :--- | :--- |
 | **API & Gateway** | Python 3.11+, FastAPI, Pydantic v2 | High-performance asynchronous REST & WebSocket endpoints |
 | **Event Backbone** | Apache Kafka (KRaft mode) | Partitioned event topics (`orders.events`, `delivery.events`, `orders.retry`, `orders.dlq`) |
-| **Real-Time Spatial State**| Redis 7 (GEO commands) | Sub-millisecond spatial fleet indexing via `GEOADD` and `GEOSEARCH` |
+| **Real-Time Spatial State**| Redis 7 (GEO commands) | Spatial fleet indexing via `GEOADD` and `GEOSEARCH` |
 | **Relational Persistence**| PostgreSQL 16, SQLAlchemy 2.0 | ACID transactions, index optimization, and `processed_events` deduplication |
 | **Telemetry & Visuals** | Streamlit + PyDeck 3D | Real-time operations dashboard with interactive route arcs and live driver pins |
-| **Observability** | Prometheus | HTTP request duration, consumer group offsets, and error rate tracking |
+| **Observability** | Prometheus | HTTP request count and latency metrics exposed at `/metrics` |
 | **Containerization** | Docker, Docker Compose | 1-command reproducible cluster environment |
-| **Cloud Deployment** | Render Cloud Blueprint (`render.yaml`)| Production-grade cloud deployment ready |
+| **Cloud Deployment** | Render Cloud Blueprint (`render.yaml`)| Render blueprint included |
 
 ---
 
@@ -96,7 +96,7 @@ LogiStream decouples client write operations from spatial dispatch and telemetri
 1. **Transactional Idempotency:**
    - Every consumer queries the `processed_events` table before applying business changes.
    - Inserting the idempotency token and updating the business entity share a **single atomic database transaction**.
-   - The Kafka consumer commits the message offset **only after** the database transaction commits successfully, guaranteeing at-least-once with zero duplicate executions.
+   - The Kafka consumer commits the message offset **only after** the database transaction commits successfully, giving at-least-once delivery with idempotent processing.
 2. **Keyed Topic Partitioning:**
    - All Kafka messages are keyed by `order_id`, ensuring strict sequential delivery per order lifecycle.
 3. **Dead-Letter Queue (DLQ) & Exponential Retries:**
@@ -138,13 +138,13 @@ Create order ──> OrderCreated ──> Kafka ──> Dispatcher (Redis GEO) �
 | :--- | :--- | :--- | :--- |
 | `POST` | `/api/v1/drivers/location` | Ingest GPS coordinates & index in Redis GEO | Driver |
 | `PUT` | `/api/v1/drivers/{id}/status` | Update driver availability (`AVAILABLE`, `BUSY`) | Driver |
-| `GET` | `/api/v1/drivers/nearby` | Sub-millisecond nearby driver discovery via Redis GEO | Public / Internal |
+| `GET` | `/api/v1/drivers/nearby` | Nearby driver discovery via Redis GEO | Public / Internal |
 
 ### 4. Real-Time Tracking (`/api/v1/tracking`)
 | Method | Endpoint | Description | Access |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/api/v1/tracking/{order_id}` | Current snapshot of assigned driver coordinates | Public |
-| `WS` | `/api/v1/tracking/ws/{order_id}` | Bi-directional WebSocket stream of live driver motion | Public |
+| `WS` | `/api/v1/tracking/ws/{order_id}` | WebSocket stream of live driver motion | Public |
 
 ---
 
@@ -164,6 +164,9 @@ cd LogiStream
 ```bash
 docker compose up --build
 ```
+
+> **First run only:** seed the driver fleet once the containers are up, otherwise orders stay in `CREATED`:
+> `docker compose exec api python init_db.py`
 
 This spins up:
 - **PostgreSQL 16:** `localhost:5432`
